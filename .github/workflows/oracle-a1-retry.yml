@@ -12,7 +12,7 @@ concurrency:
 jobs:
   create-oracle-a1:
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 10
 
     steps:
       - name: Install OCI CLI
@@ -21,87 +21,194 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Configure OCI
+        env:
+          OCI_USER_OCID: ${{ secrets.OCI_USER_OCID }}
+          OCI_FINGERPRINT: ${{ secrets.OCI_FINGERPRINT }}
+          OCI_TENANCY_OCID: ${{ secrets.OCI_TENANCY_OCID }}
+          OCI_REGION: ${{ secrets.OCI_REGION }}
+          OCI_PRIVATE_KEY: ${{ secrets.OCI_PRIVATE_KEY }}
+          OCI_SSH_PUBLIC_KEY: ${{ secrets.OCI_SSH_PUBLIC_KEY }}
         run: |
+          set -e
+
+          REGION="${OCI_REGION:-sa-saopaulo-1}"
+
           mkdir -p ~/.oci
 
           cat > ~/.oci/config <<EOF
           [DEFAULT]
-          user=${{ secrets.OCI_USER_OCID }}
-          fingerprint=${{ secrets.OCI_FINGERPRINT }}
-          tenancy=${{ secrets.OCI_TENANCY_OCID }}
-          region=${{ secrets.OCI_REGION }}
+          user=${OCI_USER_OCID}
+          fingerprint=${OCI_FINGERPRINT}
+          tenancy=${OCI_TENANCY_OCID}
+          region=${REGION}
           key_file=/home/runner/.oci/oci_api_key.pem
           EOF
 
-          printf '%s' "${{ secrets.OCI_PRIVATE_KEY }}" | sed 's/\\n/\n/g' > ~/.oci/oci_api_key.pem
+          printf '%s' "$OCI_PRIVATE_KEY" | sed 's/\\n/\n/g' > ~/.oci/oci_api_key.pem
           chmod 600 ~/.oci/oci_api_key.pem
 
-          printf '%s' "${{ secrets.OCI_SSH_PUBLIC_KEY }}" > /tmp/sshkey.pub
+          printf '%s' "$OCI_SSH_PUBLIC_KEY" > /tmp/sshkey.pub
+
+          echo "OCI configurado."
 
       - name: Try create Oracle A1
+        env:
+          OCI_REGION: ${{ secrets.OCI_REGION }}
+          OCI_DISPLAY_NAME: ${{ secrets.OCI_DISPLAY_NAME }}
+          OCI_OCPUS: ${{ secrets.OCI_OCPUS }}
+          OCI_MEMORY_GB: ${{ secrets.OCI_MEMORY_GB }}
+          OCI_COMPARTMENT_ID: ${{ secrets.OCI_COMPARTMENT_ID }}
+          OCI_AD: ${{ secrets.OCI_AD }}
+          OCI_SUBNET_ID: ${{ secrets.OCI_SUBNET_ID }}
+          OCI_IMAGE_ID: ${{ secrets.OCI_IMAGE_ID }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
         run: |
           set +e
 
-          REGION="${{ secrets.OCI_REGION }}"
-          DISPLAY_NAME="${{ secrets.OCI_DISPLAY_NAME }}"
-          OCPUS="${{ secrets.OCI_OCPUS }}"
-          MEMORY="${{ secrets.OCI_MEMORY_GB }}"
-
-          if [ -z "$REGION" ]; then REGION="sa-saopaulo-1"; fi
-          if [ -z "$DISPLAY_NAME" ]; then DISPLAY_NAME="oracle-a1-auto"; fi
-          if [ -z "$OCPUS" ]; then OCPUS="1"; fi
-          if [ -z "$MEMORY" ]; then MEMORY="6"; fi
+          REGION="${OCI_REGION:-sa-saopaulo-1}"
+          DISPLAY_NAME="${OCI_DISPLAY_NAME:-oracle-a1-auto}"
+          OCPUS="${OCI_OCPUS:-1}"
+          MEMORY="${OCI_MEMORY_GB:-6}"
 
           SHAPE="VM.Standard.A1.Flex"
           SHAPE_CONFIG="{\"ocpus\":${OCPUS},\"memoryInGBs\":${MEMORY}}"
 
           send_telegram() {
-            if [ -n "${{ secrets.TG_BOT_TOKEN }}" ] && [ -n "${{ secrets.TG_CHAT_ID }}" ]; then
-              curl -s -X POST "https://api.telegram.org/bot${{ secrets.TG_BOT_TOKEN }}/sendMessage" \
-                -d chat_id="${{ secrets.TG_CHAT_ID }}" \
-                --data-urlencode text="$1" > /dev/null
+            TEXT="$1"
+
+            if [ -n "$TG_BOT_TOKEN" ] && [ -n "$TG_CHAT_ID" ]; then
+              curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
+                -d chat_id="${TG_CHAT_ID}" \
+                --data-urlencode text="$TEXT" > /dev/null
             fi
           }
 
-          check_existing() {
-            EXISTING=$(oci compute instance list \
-              --region "$REGION" \
-              --compartment-id "${{ secrets.OCI_COMPARTMENT_ID }}" \
-              --display-name "$DISPLAY_NAME" \
-              --lifecycle-state RUNNING \
-              --query "data[0].id" \
-              --raw-output 2>/dev/null)
+          echo "Região: $REGION"
+          echo "Nome da VM: $DISPLAY_NAME"
+          echo "Shape: $SHAPE"
+          echo "OCPUs: $OCPUS"
+          echo "Memória: ${MEMORY}GB"
 
-            if [ -n "$EXISTING" ] && [ "$EXISTING" != "null" ]; then
-              echo "Já existe VM rodando: $EXISTING"
+          if [ -z "$OCI_COMPARTMENT_ID" ]; then
+            echo "Erro: OCI_COMPARTMENT_ID vazio."
+            send_telegram "⚠️ Oracle Auto: OCI_COMPARTMENT_ID vazio."
+            exit 0
+          fi
+
+          if [ -z "$OCI_AD" ]; then
+            echo "Erro: OCI_AD vazio."
+            send_telegram "⚠️ Oracle Auto: OCI_AD vazio."
+            exit 0
+          fi
+
+          if [ -z "$OCI_SUBNET_ID" ]; then
+            echo "Erro: OCI_SUBNET_ID vazio."
+            send_telegram "⚠️ Oracle Auto: OCI_SUBNET_ID vazio."
+            exit 0
+          fi
+
+          if [ ! -s /tmp/sshkey.pub ]; then
+            echo "Erro: OCI_SSH_PUBLIC_KEY vazio."
+            send_telegram "⚠️ Oracle Auto: OCI_SSH_PUBLIC_KEY vazio."
+            exit 0
+          fi
+
+          echo "Verificando se já existe VM com esse nome..."
+
+          EXISTING_RUNNING=$(oci compute instance list \
+            --region "$REGION" \
+            --compartment-id "$OCI_COMPARTMENT_ID" \
+            --display-name "$DISPLAY_NAME" \
+            --lifecycle-state RUNNING \
+            --query "data[0].id" \
+            --raw-output 2>/dev/null)
+
+          if [ -n "$EXISTING_RUNNING" ] && [ "$EXISTING_RUNNING" != "null" ]; then
+            echo "Já existe VM rodando: $EXISTING_RUNNING"
+            exit 0
+          fi
+
+          EXISTING_PROVISIONING=$(oci compute instance list \
+            --region "$REGION" \
+            --compartment-id "$OCI_COMPARTMENT_ID" \
+            --display-name "$DISPLAY_NAME" \
+            --lifecycle-state PROVISIONING \
+            --query "data[0].id" \
+            --raw-output 2>/dev/null)
+
+          if [ -n "$EXISTING_PROVISIONING" ] && [ "$EXISTING_PROVISIONING" != "null" ]; then
+            echo "Já existe VM provisionando: $EXISTING_PROVISIONING"
+            exit 0
+          fi
+
+          IMAGE_ID="$OCI_IMAGE_ID"
+
+          if [ -z "$IMAGE_ID" ]; then
+            echo "OCI_IMAGE_ID vazio. Buscando Oracle Linux 9 compatível com A1..."
+
+            IMAGE_ID=$(oci compute image list \
+              --region "$REGION" \
+              --compartment-id "$OCI_COMPARTMENT_ID" \
+              --operating-system "Oracle Linux" \
+              --operating-system-version "9" \
+              --shape "$SHAPE" \
+              --sort-by TIMECREATED \
+              --sort-order DESC \
+              --query "data[0].id" \
+              --raw-output 2>/tmp/image_error.log)
+
+            if [ -z "$IMAGE_ID" ] || [ "$IMAGE_ID" = "null" ]; then
+              echo "Falhou ao buscar Oracle Linux 9. Tentando Oracle Linux 8..."
+
+              IMAGE_ID=$(oci compute image list \
+                --region "$REGION" \
+                --compartment-id "$OCI_COMPARTMENT_ID" \
+                --operating-system "Oracle Linux" \
+                --operating-system-version "8" \
+                --shape "$SHAPE" \
+                --sort-by TIMECREATED \
+                --sort-order DESC \
+                --query "data[0].id" \
+                --raw-output 2>/tmp/image_error.log)
+            fi
+
+            if [ -z "$IMAGE_ID" ] || [ "$IMAGE_ID" = "null" ]; then
+              echo "Não consegui encontrar imagem automática."
+              cat /tmp/image_error.log
+              send_telegram "⚠️ Oracle Auto: não consegui encontrar IMAGE_ID automático."
               exit 0
             fi
-          }
+          fi
+
+          echo "Imagem usada: $IMAGE_ID"
 
           try_launch() {
             FD="$1"
 
             echo "Tentando criar VM. Fault Domain: ${FD:-nenhum}"
 
-            CMD="oci compute instance launch \
-              --region $REGION \
-              --availability-domain '${{ secrets.OCI_AD }}' \
-              --compartment-id '${{ secrets.OCI_COMPARTMENT_ID }}' \
-              --shape $SHAPE \
-              --shape-config '$SHAPE_CONFIG' \
-              --subnet-id '${{ secrets.OCI_SUBNET_ID }}' \
-              --image-id '${{ secrets.OCI_IMAGE_ID }}' \
-              --ssh-authorized-keys-file /tmp/sshkey.pub \
-              --assign-public-ip true \
-              --display-name '$DISPLAY_NAME' \
-              --query 'data.id' \
-              --raw-output"
+            ARGS=(
+              compute instance launch
+              --region "$REGION"
+              --availability-domain "$OCI_AD"
+              --compartment-id "$OCI_COMPARTMENT_ID"
+              --shape "$SHAPE"
+              --shape-config "$SHAPE_CONFIG"
+              --subnet-id "$OCI_SUBNET_ID"
+              --image-id "$IMAGE_ID"
+              --ssh-authorized-keys-file /tmp/sshkey.pub
+              --assign-public-ip true
+              --display-name "$DISPLAY_NAME"
+              --query "data.id"
+              --raw-output
+            )
 
             if [ -n "$FD" ]; then
-              CMD="$CMD --fault-domain $FD"
+              ARGS+=(--fault-domain "$FD")
             fi
 
-            OUT=$(eval "$CMD" 2>&1)
+            OUT=$(oci "${ARGS[@]}" 2>&1)
             CODE=$?
 
             echo "$OUT"
@@ -110,7 +217,7 @@ jobs:
               send_telegram "✅ Oracle A1 criada com sucesso!
 Nome: $DISPLAY_NAME
 FD: ${FD:-sem fault domain}
-Instance:
+Instance OCID:
 $OUT"
               exit 0
             fi
@@ -120,21 +227,25 @@ $OUT"
               return 0
             fi
 
-            if echo "$OUT" | grep -Eiq "NotAuthorized|Authorization|InvalidParameter|LimitExceeded|quota"; then
-              send_telegram "⚠️ Erro diferente na Oracle:
-$OUT"
+            if echo "$OUT" | grep -Eiq "NotAuthorized|Authorization|InvalidParameter|LimitExceeded|quota|ServiceError|Forbidden"; then
+              SHORT=$(echo "$OUT" | head -c 1800)
+              send_telegram "⚠️ Oracle Auto: erro diferente de capacidade:
+$SHORT"
               return 0
             fi
-          }
 
-          check_existing
+            return 0
+          }
 
           try_launch ""
           sleep 5
+
           try_launch "FAULT-DOMAIN-1"
           sleep 5
+
           try_launch "FAULT-DOMAIN-2"
           sleep 5
+
           try_launch "FAULT-DOMAIN-3"
 
           echo "Não conseguiu agora. Vai tentar no próximo ciclo."
