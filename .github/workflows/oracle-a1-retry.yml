@@ -6,11 +6,11 @@ on:
       ocpus:
         description: "OCPUs da A1 Flex"
         required: false
-        default: "1"
+        default: ""
       memory_gb:
         description: "RAM em GB da A1 Flex"
         required: false
-        default: "6"
+        default: ""
   schedule:
     - cron: "*/5 * * * *"
 
@@ -20,197 +20,207 @@ concurrency:
 
 jobs:
   create-oracle-a1:
+    name: Try create Oracle A1
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
     steps:
       - name: Install OCI CLI
+        shell: bash
         run: |
-          set -e
-          python -m pip install --user oci-cli
+          set -euo pipefail
+          python3 -m pip install --user --upgrade pip
+          python3 -m pip install --user --upgrade oci-cli
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/oci" --version
 
       - name: Configure OCI
+        shell: bash
         env:
           OCI_USER_OCID: ${{ secrets.OCI_USER_OCID }}
-          OCI_FINGERPRINT: ${{ secrets.OCI_FINGERPRINT }}
           OCI_TENANCY_OCID: ${{ secrets.OCI_TENANCY_OCID }}
-          OCI_REGION: ${{ secrets.OCI_REGION }}
+          OCI_FINGERPRINT: ${{ secrets.OCI_FINGERPRINT }}
           OCI_PRIVATE_KEY: ${{ secrets.OCI_PRIVATE_KEY }}
+          OCI_REGION: ${{ secrets.OCI_REGION }}
           OCI_SSH_PUBLIC_KEY: ${{ secrets.OCI_SSH_PUBLIC_KEY }}
         run: |
-          set -e
+          set -euo pipefail
 
-          REGION="${OCI_REGION:-sa-saopaulo-1}"
+          missing=0
+          for name in OCI_USER_OCID OCI_TENANCY_OCID OCI_FINGERPRINT OCI_PRIVATE_KEY OCI_REGION OCI_SSH_PUBLIC_KEY; do
+            if [ -z "${!name:-}" ]; then
+              echo "::error title=Missing secret::$name is empty or not configured."
+              missing=1
+            fi
+          done
 
-          mkdir -p ~/.oci
+          if [ "$missing" -ne 0 ]; then
+            exit 1
+          fi
 
-          cat > ~/.oci/config <<EOF
+          mkdir -p "$HOME/.oci"
+
+          printf '%s' "$OCI_PRIVATE_KEY" | sed 's/\\n/\n/g' > "$HOME/.oci/oci_api_key.pem"
+          chmod 600 "$HOME/.oci/oci_api_key.pem"
+
+          cat > "$HOME/.oci/config" <<EOF
           [DEFAULT]
           user=${OCI_USER_OCID}
           fingerprint=${OCI_FINGERPRINT}
           tenancy=${OCI_TENANCY_OCID}
-          region=${REGION}
-          key_file=/home/runner/.oci/oci_api_key.pem
+          region=${OCI_REGION}
+          key_file=${HOME}/.oci/oci_api_key.pem
           EOF
 
-          printf '%s' "$OCI_PRIVATE_KEY" | sed 's/\\n/\n/g' > ~/.oci/oci_api_key.pem
-          chmod 600 ~/.oci/oci_api_key.pem
-
+          chmod 600 "$HOME/.oci/config"
           printf '%s' "$OCI_SSH_PUBLIC_KEY" > /tmp/sshkey.pub
 
-          echo "OCI configurado."
+          oci iam region list --auth api_key --output table >/dev/null
+          echo "OCI CLI configured."
 
-      - name: Try create Oracle A1
+      - name: Try create Oracle A1 Flex instance
+        shell: bash
         env:
-          OCI_REGION: ${{ secrets.OCI_REGION }}
-          OCI_DISPLAY_NAME: ${{ secrets.OCI_DISPLAY_NAME }}
           OCI_COMPARTMENT_ID: ${{ secrets.OCI_COMPARTMENT_ID }}
           OCI_AD: ${{ secrets.OCI_AD }}
           OCI_SUBNET_ID: ${{ secrets.OCI_SUBNET_ID }}
           OCI_IMAGE_ID: ${{ secrets.OCI_IMAGE_ID }}
+          OCI_REGION: ${{ secrets.OCI_REGION }}
+          OCI_DISPLAY_NAME: ${{ secrets.OCI_DISPLAY_NAME }}
           SECRET_OCPUS: ${{ secrets.OCI_OCPUS }}
           SECRET_MEMORY_GB: ${{ secrets.OCI_MEMORY_GB }}
-          INPUT_OCPUS: ${{ github.event.inputs.ocpus }}
-          INPUT_MEMORY_GB: ${{ github.event.inputs.memory_gb }}
+          INPUT_OCPUS: ${{ github.event.inputs.ocpus || '' }}
+          INPUT_MEMORY_GB: ${{ github.event.inputs.memory_gb || '' }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
         run: |
-          set +e
-
-          REGION="${OCI_REGION:-sa-saopaulo-1}"
-          DISPLAY_NAME="${OCI_DISPLAY_NAME:-oracle-a1-auto}"
-
-          OCPUS="${INPUT_OCPUS:-$SECRET_OCPUS}"
-          MEMORY="${INPUT_MEMORY_GB:-$SECRET_MEMORY_GB}"
-
-          OCPUS="${OCPUS:-1}"
-          MEMORY="${MEMORY:-6}"
+          set -uo pipefail
 
           SHAPE="VM.Standard.A1.Flex"
-          SHAPE_CONFIG="{\"ocpus\":${OCPUS},\"memoryInGBs\":${MEMORY}}"
+          DISPLAY_NAME="${OCI_DISPLAY_NAME:-oracle-a1-auto}"
+          OCPUS="${INPUT_OCPUS:-${SECRET_OCPUS:-1}}"
+          MEMORY_GB="${INPUT_MEMORY_GB:-${SECRET_MEMORY_GB:-6}}"
 
           send_telegram() {
-            TEXT="$1"
+            local text="$1"
 
-            if [ -n "$TG_BOT_TOKEN" ] && [ -n "$TG_CHAT_ID" ]; then
-              curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
-                -d chat_id="${TG_CHAT_ID}" \
-                --data-urlencode text="$TEXT" > /dev/null
+            if [ -n "${TG_BOT_TOKEN:-}" ] && [ -n "${TG_CHAT_ID:-}" ]; then
+              curl -fsS -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
+                -d "chat_id=${TG_CHAT_ID}" \
+                --data-urlencode "text=${text}" >/dev/null || true
             fi
           }
 
-          echo "Região: $REGION"
-          echo "Nome da VM: $DISPLAY_NAME"
-          echo "Shape: $SHAPE"
-          echo "OCPUs: $OCPUS"
-          echo "Memória: ${MEMORY}GB"
-
-          if [ -z "$OCI_COMPARTMENT_ID" ]; then
-            echo "Erro: OCI_COMPARTMENT_ID vazio."
-            send_telegram "⚠️ Oracle Auto: OCI_COMPARTMENT_ID vazio."
+          fail_required() {
+            local message="$1"
+            echo "::error::$message"
+            send_telegram "Oracle Auto: $message"
             exit 1
-          fi
+          }
 
-          if [ -z "$OCI_AD" ]; then
-            echo "Erro: OCI_AD vazio."
-            send_telegram "⚠️ Oracle Auto: OCI_AD vazio."
-            exit 1
-          fi
-
-          if [ -z "$OCI_SUBNET_ID" ]; then
-            echo "Erro: OCI_SUBNET_ID vazio."
-            send_telegram "⚠️ Oracle Auto: OCI_SUBNET_ID vazio."
-            exit 1
-          fi
+          for name in OCI_COMPARTMENT_ID OCI_AD OCI_SUBNET_ID OCI_REGION; do
+            if [ -z "${!name:-}" ]; then
+              fail_required "$name is empty or not configured."
+            fi
+          done
 
           if [ ! -s /tmp/sshkey.pub ]; then
-            echo "Erro: OCI_SSH_PUBLIC_KEY vazio."
-            send_telegram "⚠️ Oracle Auto: OCI_SSH_PUBLIC_KEY vazio."
-            exit 1
+            fail_required "OCI_SSH_PUBLIC_KEY is empty or not configured."
           fi
 
-          echo "Verificando se já existe VM com esse nome..."
+          if ! [[ "$OCPUS" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+            fail_required "OCI_OCPUS/input ocpus must be numeric. Current value: $OCPUS"
+          fi
 
+          if ! [[ "$MEMORY_GB" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+            fail_required "OCI_MEMORY_GB/input memory_gb must be numeric. Current value: $MEMORY_GB"
+          fi
+
+          SHAPE_CONFIG="{\"ocpus\":${OCPUS},\"memoryInGBs\":${MEMORY_GB}}"
+
+          echo "Region: $OCI_REGION"
+          echo "Display name: $DISPLAY_NAME"
+          echo "Shape: $SHAPE"
+          echo "OCPUs: $OCPUS"
+          echo "Memory: ${MEMORY_GB}GB"
+
+          echo "Checking for an existing running instance with the same display name..."
           EXISTING_RUNNING=$(oci compute instance list \
-            --region "$REGION" \
+            --region "$OCI_REGION" \
             --compartment-id "$OCI_COMPARTMENT_ID" \
             --display-name "$DISPLAY_NAME" \
             --lifecycle-state RUNNING \
             --query "data[0].id" \
-            --raw-output 2>/dev/null)
+            --raw-output 2>/dev/null || true)
 
           if [ -n "$EXISTING_RUNNING" ] && [ "$EXISTING_RUNNING" != "null" ]; then
-            echo "Já existe VM rodando: $EXISTING_RUNNING"
-            send_telegram "✅ Oracle Auto: já existe VM rodando.
-Nome: $DISPLAY_NAME
-Instance OCID:
-$EXISTING_RUNNING"
+            echo "Instance already running: $EXISTING_RUNNING"
+            send_telegram "Oracle Auto: instance already running.
+          Name: $DISPLAY_NAME
+          Instance OCID:
+          $EXISTING_RUNNING"
             exit 0
           fi
 
           EXISTING_PROVISIONING=$(oci compute instance list \
-            --region "$REGION" \
+            --region "$OCI_REGION" \
             --compartment-id "$OCI_COMPARTMENT_ID" \
             --display-name "$DISPLAY_NAME" \
             --lifecycle-state PROVISIONING \
             --query "data[0].id" \
-            --raw-output 2>/dev/null)
+            --raw-output 2>/dev/null || true)
 
           if [ -n "$EXISTING_PROVISIONING" ] && [ "$EXISTING_PROVISIONING" != "null" ]; then
-            echo "Já existe VM provisionando: $EXISTING_PROVISIONING"
+            echo "Instance already provisioning: $EXISTING_PROVISIONING"
             exit 0
           fi
 
-          IMAGE_ID="$OCI_IMAGE_ID"
+          find_platform_image() {
+            local version="$1"
 
-          if [ -z "$IMAGE_ID" ]; then
-            echo "OCI_IMAGE_ID vazio. Buscando Oracle Linux 9 compatível com A1..."
-
-            IMAGE_ID=$(oci compute image list \
-              --region "$REGION" \
+            oci compute image list \
+              --region "$OCI_REGION" \
               --compartment-id "$OCI_COMPARTMENT_ID" \
               --operating-system "Oracle Linux" \
-              --operating-system-version "9" \
+              --operating-system-version "$version" \
               --shape "$SHAPE" \
               --sort-by TIMECREATED \
               --sort-order DESC \
               --query "data[0].id" \
-              --raw-output 2>/tmp/image_error.log)
+              --raw-output 2>/tmp/image_error.log || true
+          }
+
+          IMAGE_ID="${OCI_IMAGE_ID:-}"
+
+          if [ -z "$IMAGE_ID" ]; then
+            echo "OCI_IMAGE_ID not configured. Searching for an Oracle Linux 9 A1-compatible image..."
+            IMAGE_ID="$(find_platform_image "9")"
 
             if [ -z "$IMAGE_ID" ] || [ "$IMAGE_ID" = "null" ]; then
-              echo "Falhou Oracle Linux 9. Tentando Oracle Linux 8..."
-
-              IMAGE_ID=$(oci compute image list \
-                --region "$REGION" \
-                --compartment-id "$OCI_COMPARTMENT_ID" \
-                --operating-system "Oracle Linux" \
-                --operating-system-version "8" \
-                --shape "$SHAPE" \
-                --sort-by TIMECREATED \
-                --sort-order DESC \
-                --query "data[0].id" \
-                --raw-output 2>/tmp/image_error.log)
+              echo "Oracle Linux 9 image not found. Trying Oracle Linux 8..."
+              IMAGE_ID="$(find_platform_image "8")"
             fi
 
             if [ -z "$IMAGE_ID" ] || [ "$IMAGE_ID" = "null" ]; then
-              echo "Não consegui encontrar imagem automática."
-              cat /tmp/image_error.log
-              send_telegram "⚠️ Oracle Auto: não consegui encontrar IMAGE_ID automático."
+              echo "Could not find an Oracle Linux 9 or 8 A1-compatible image."
+              cat /tmp/image_error.log || true
+              send_telegram "Oracle Auto: could not find an automatic Oracle Linux 9 or 8 IMAGE_ID for $SHAPE."
               exit 1
             fi
           fi
 
-          echo "Imagem usada: $IMAGE_ID"
+          echo "Image ID: $IMAGE_ID"
 
           try_launch() {
-            FD="$1"
+            local fault_domain="${1:-}"
+            local output
+            local code
 
-            echo "Tentando criar VM. Fault Domain: ${FD:-nenhum}"
+            echo "Trying to create instance. Fault domain: ${fault_domain:-none}"
 
-            ARGS=(
+            args=(
               compute instance launch
-              --region "$REGION"
+              --region "$OCI_REGION"
               --availability-domain "$OCI_AD"
               --compartment-id "$OCI_COMPARTMENT_ID"
               --shape "$SHAPE"
@@ -224,36 +234,35 @@ $EXISTING_RUNNING"
               --raw-output
             )
 
-            if [ -n "$FD" ]; then
-              ARGS+=(--fault-domain "$FD")
+            if [ -n "$fault_domain" ]; then
+              args+=(--fault-domain "$fault_domain")
             fi
 
-            OUT=$(oci "${ARGS[@]}" 2>&1)
-            CODE=$?
+            output="$(oci "${args[@]}" 2>&1)"
+            code=$?
 
-            echo "$OUT"
+            echo "$output"
 
-            if [ $CODE -eq 0 ] && echo "$OUT" | grep -q "ocid1.instance"; then
-              send_telegram "✅ Oracle A1 criada com sucesso!
-Nome: $DISPLAY_NAME
-Shape: $SHAPE
-OCPUs: $OCPUS
-RAM: ${MEMORY}GB
-FD: ${FD:-sem fault domain}
-Instance OCID:
-$OUT"
+            if [ "$code" -eq 0 ] && echo "$output" | grep -q "ocid1.instance"; then
+              send_telegram "Oracle A1 created successfully.
+          Name: $DISPLAY_NAME
+          Shape: $SHAPE
+          OCPUs: $OCPUS
+          RAM: ${MEMORY_GB}GB
+          Fault domain: ${fault_domain:-none}
+          Instance OCID:
+          $output"
               exit 0
             fi
 
-            if echo "$OUT" | grep -Eiq "Out of capacity|Out of host capacity|capacity"; then
-              echo "Sem capacidade ainda."
+            if echo "$output" | grep -Eiq "Out of capacity|Out of host capacity|capacity"; then
+              echo "No capacity available yet."
               return 0
             fi
 
-            if echo "$OUT" | grep -Eiq "NotAuthorized|Authorization|InvalidParameter|LimitExceeded|quota|ServiceError|Forbidden|FaultDomain"; then
-              SHORT=$(echo "$OUT" | head -c 1800)
-              send_telegram "⚠️ Oracle Auto: erro diferente de capacidade:
-$SHORT"
+            if echo "$output" | grep -Eiq "NotAuthorized|Authorization|InvalidParameter|LimitExceeded|quota|ServiceError|Forbidden|FaultDomain"; then
+              send_telegram "Oracle Auto: non-capacity error:
+          $(echo "$output" | head -c 1800)"
               return 0
             fi
 
@@ -271,4 +280,4 @@ $SHORT"
 
           try_launch "FAULT-DOMAIN-3"
 
-          echo "Não conseguiu agora. Vai tentar no próximo ciclo."
+          echo "Instance was not created in this cycle. The schedule will try again."
