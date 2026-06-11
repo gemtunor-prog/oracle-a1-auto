@@ -2,6 +2,15 @@ name: Oracle A1 Auto Retry
 
 on:
   workflow_dispatch:
+    inputs:
+      ocpus:
+        description: "OCPUs da A1 Flex"
+        required: false
+        default: "1"
+      memory_gb:
+        description: "RAM em GB da A1 Flex"
+        required: false
+        default: "6"
   schedule:
     - cron: "*/5 * * * *"
 
@@ -17,6 +26,7 @@ jobs:
     steps:
       - name: Install OCI CLI
         run: |
+          set -e
           python -m pip install --user oci-cli
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
@@ -55,12 +65,14 @@ jobs:
         env:
           OCI_REGION: ${{ secrets.OCI_REGION }}
           OCI_DISPLAY_NAME: ${{ secrets.OCI_DISPLAY_NAME }}
-          OCI_OCPUS: ${{ secrets.OCI_OCPUS }}
-          OCI_MEMORY_GB: ${{ secrets.OCI_MEMORY_GB }}
           OCI_COMPARTMENT_ID: ${{ secrets.OCI_COMPARTMENT_ID }}
           OCI_AD: ${{ secrets.OCI_AD }}
           OCI_SUBNET_ID: ${{ secrets.OCI_SUBNET_ID }}
           OCI_IMAGE_ID: ${{ secrets.OCI_IMAGE_ID }}
+          SECRET_OCPUS: ${{ secrets.OCI_OCPUS }}
+          SECRET_MEMORY_GB: ${{ secrets.OCI_MEMORY_GB }}
+          INPUT_OCPUS: ${{ github.event.inputs.ocpus }}
+          INPUT_MEMORY_GB: ${{ github.event.inputs.memory_gb }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
         run: |
@@ -68,8 +80,12 @@ jobs:
 
           REGION="${OCI_REGION:-sa-saopaulo-1}"
           DISPLAY_NAME="${OCI_DISPLAY_NAME:-oracle-a1-auto}"
-          OCPUS="${OCI_OCPUS:-1}"
-          MEMORY="${OCI_MEMORY_GB:-6}"
+
+          OCPUS="${INPUT_OCPUS:-$SECRET_OCPUS}"
+          MEMORY="${INPUT_MEMORY_GB:-$SECRET_MEMORY_GB}"
+
+          OCPUS="${OCPUS:-1}"
+          MEMORY="${MEMORY:-6}"
 
           SHAPE="VM.Standard.A1.Flex"
           SHAPE_CONFIG="{\"ocpus\":${OCPUS},\"memoryInGBs\":${MEMORY}}"
@@ -93,25 +109,25 @@ jobs:
           if [ -z "$OCI_COMPARTMENT_ID" ]; then
             echo "Erro: OCI_COMPARTMENT_ID vazio."
             send_telegram "⚠️ Oracle Auto: OCI_COMPARTMENT_ID vazio."
-            exit 0
+            exit 1
           fi
 
           if [ -z "$OCI_AD" ]; then
             echo "Erro: OCI_AD vazio."
             send_telegram "⚠️ Oracle Auto: OCI_AD vazio."
-            exit 0
+            exit 1
           fi
 
           if [ -z "$OCI_SUBNET_ID" ]; then
             echo "Erro: OCI_SUBNET_ID vazio."
             send_telegram "⚠️ Oracle Auto: OCI_SUBNET_ID vazio."
-            exit 0
+            exit 1
           fi
 
           if [ ! -s /tmp/sshkey.pub ]; then
             echo "Erro: OCI_SSH_PUBLIC_KEY vazio."
             send_telegram "⚠️ Oracle Auto: OCI_SSH_PUBLIC_KEY vazio."
-            exit 0
+            exit 1
           fi
 
           echo "Verificando se já existe VM com esse nome..."
@@ -126,6 +142,10 @@ jobs:
 
           if [ -n "$EXISTING_RUNNING" ] && [ "$EXISTING_RUNNING" != "null" ]; then
             echo "Já existe VM rodando: $EXISTING_RUNNING"
+            send_telegram "✅ Oracle Auto: já existe VM rodando.
+Nome: $DISPLAY_NAME
+Instance OCID:
+$EXISTING_RUNNING"
             exit 0
           fi
 
@@ -159,7 +179,7 @@ jobs:
               --raw-output 2>/tmp/image_error.log)
 
             if [ -z "$IMAGE_ID" ] || [ "$IMAGE_ID" = "null" ]; then
-              echo "Falhou ao buscar Oracle Linux 9. Tentando Oracle Linux 8..."
+              echo "Falhou Oracle Linux 9. Tentando Oracle Linux 8..."
 
               IMAGE_ID=$(oci compute image list \
                 --region "$REGION" \
@@ -177,7 +197,7 @@ jobs:
               echo "Não consegui encontrar imagem automática."
               cat /tmp/image_error.log
               send_telegram "⚠️ Oracle Auto: não consegui encontrar IMAGE_ID automático."
-              exit 0
+              exit 1
             fi
           fi
 
@@ -216,6 +236,9 @@ jobs:
             if [ $CODE -eq 0 ] && echo "$OUT" | grep -q "ocid1.instance"; then
               send_telegram "✅ Oracle A1 criada com sucesso!
 Nome: $DISPLAY_NAME
+Shape: $SHAPE
+OCPUs: $OCPUS
+RAM: ${MEMORY}GB
 FD: ${FD:-sem fault domain}
 Instance OCID:
 $OUT"
@@ -227,7 +250,7 @@ $OUT"
               return 0
             fi
 
-            if echo "$OUT" | grep -Eiq "NotAuthorized|Authorization|InvalidParameter|LimitExceeded|quota|ServiceError|Forbidden"; then
+            if echo "$OUT" | grep -Eiq "NotAuthorized|Authorization|InvalidParameter|LimitExceeded|quota|ServiceError|Forbidden|FaultDomain"; then
               SHORT=$(echo "$OUT" | head -c 1800)
               send_telegram "⚠️ Oracle Auto: erro diferente de capacidade:
 $SHORT"
