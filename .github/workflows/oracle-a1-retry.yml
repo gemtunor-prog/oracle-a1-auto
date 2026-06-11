@@ -78,6 +78,72 @@ jobs:
           oci iam region list --auth api_key --output table >/dev/null
           echo "OCI CLI configured."
 
+      - name: Build hourly Telegram heartbeat key
+        id: heartbeat
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "key=oracle-a1-heartbeat-$(date -u +%Y%m%d%H)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore hourly Telegram heartbeat marker
+        id: heartbeat-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: /tmp/oracle-a1-heartbeat-marker
+          key: ${{ steps.heartbeat.outputs.key }}
+          lookup-only: true
+
+      - name: Send Telegram start or hourly heartbeat
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          HEARTBEAT_CACHE_HIT: ${{ steps.heartbeat-cache.outputs.cache-hit }}
+          OCI_DISPLAY_NAME: ${{ secrets.OCI_DISPLAY_NAME }}
+          OCI_OCPUS: ${{ secrets.OCI_OCPUS }}
+          OCI_MEMORY_GB: ${{ secrets.OCI_MEMORY_GB }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+        run: |
+          set -euo pipefail
+
+          send_telegram() {
+            local text="$1"
+
+            if [ -n "${TG_BOT_TOKEN:-}" ] && [ -n "${TG_CHAT_ID:-}" ]; then
+              curl -fsS -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
+                -d "chat_id=${TG_CHAT_ID}" \
+                --data-urlencode "text=${text}" >/dev/null || true
+            fi
+          }
+
+          DISPLAY_NAME="${OCI_DISPLAY_NAME:-oracle-a1-auto}"
+          OCPUS="${OCI_OCPUS:-1}"
+          MEMORY_GB="${OCI_MEMORY_GB:-6}"
+
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            send_telegram "Oracle Auto: workflow iniciado manualmente.
+          Nome: $DISPLAY_NAME
+          Tentativas: a cada 5 minutos
+          Shape: VM.Standard.A1.Flex
+          OCPUs: $OCPUS
+          RAM: ${MEMORY_GB}GB"
+          elif [ "${HEARTBEAT_CACHE_HIT:-false}" != "true" ]; then
+            send_telegram "Oracle Auto: ainda rodando.
+          Tentando criar a A1 a cada 5 minutos.
+          Nome: $DISPLAY_NAME
+          Shape: VM.Standard.A1.Flex"
+            echo "sent=$(date -u +%Y-%m-%dT%H:%M:%SZ)" > /tmp/oracle-a1-heartbeat-marker
+          else
+            echo "Hourly Telegram heartbeat already sent."
+          fi
+
+      - name: Save hourly Telegram heartbeat marker
+        if: ${{ github.event_name == 'schedule' && steps.heartbeat-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: /tmp/oracle-a1-heartbeat-marker
+          key: ${{ steps.heartbeat.outputs.key }}
+
       - name: Try create Oracle A1 Flex instance
         shell: bash
         env:
