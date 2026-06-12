@@ -30,7 +30,7 @@ jobs:
   create-oracle-a1:
     name: Try create Oracle A1
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 5
 
     steps:
       - name: Checkout repository
@@ -128,6 +128,14 @@ jobs:
           TRANSIENT_ERRORS=0
           OTHER_ERRORS=0
           LAST_RESULT="not-started"
+          FD_INDEX=$((TOTAL_RECORDED_TESTS % 4))
+          case "$FD_INDEX" in
+            0) SELECTED_FAULT_DOMAIN="" ;;
+            1) SELECTED_FAULT_DOMAIN="FAULT-DOMAIN-1" ;;
+            2) SELECTED_FAULT_DOMAIN="FAULT-DOMAIN-2" ;;
+            *) SELECTED_FAULT_DOMAIN="FAULT-DOMAIN-3" ;;
+          esac
+          SELECTED_FAULT_DOMAIN_LABEL="${SELECTED_FAULT_DOMAIN:-none}"
 
           elapsed_seconds() {
             echo "$(($(date +%s) - START_TS))"
@@ -384,15 +392,17 @@ jobs:
             "Evento: ${EVENT_NAME}" \
             "Ciclo: #${CYCLE_NUMBER} tentativa GitHub ${GITHUB_RUN_ATTEMPT}" \
             "Nome: $DISPLAY_NAME" \
-              "Shape: $SHAPE" \
-              "OCPUs/RAM: ${OCPUS}/${MEMORY_GB}GB" \
-              "Agenda: tenta automaticamente a cada 5 minutos quando o GitHub liberar o runner" \
-              "Próximo teste estimado: $PREDICTED_NEXT_START" \
-              "Ciclos registrados: ${TOTAL_RECORDED_CYCLES}" \
-              "Testes registrados: ${TOTAL_RECORDED_TESTS}" \
-              "Média de duração: ${AVG_DURATION_SECONDS}s" \
-              "Média entre inícios: ${AVG_START_GAP_SECONDS}s" \
-              "Run: $RUN_URL"
+            "Shape: $SHAPE" \
+            "OCPUs/RAM: ${OCPUS}/${MEMORY_GB}GB" \
+            "Modo: rápido, 1 tentativa por execução" \
+            "Fault domain desta vez: ${SELECTED_FAULT_DOMAIN_LABEL}" \
+            "Agenda: tenta automaticamente a cada 5 minutos quando o GitHub liberar o runner" \
+            "Próximo teste estimado: $PREDICTED_NEXT_START" \
+            "Ciclos registrados: ${TOTAL_RECORDED_CYCLES}" \
+            "Testes registrados: ${TOTAL_RECORDED_TESTS}" \
+            "Média de duração: ${AVG_DURATION_SECONDS}s" \
+            "Média entre inícios: ${AVG_START_GAP_SECONDS}s" \
+            "Run: $RUN_URL"
 
           echo "Region: $OCI_REGION"
           echo "Display name: $DISPLAY_NAME"
@@ -551,7 +561,7 @@ jobs:
                 "OCPUs/RAM: ${OCPUS}/${MEMORY_GB}GB" \
                 "Fault domain: ${fault_domain:-none}" \
                 "Ciclo: #${CYCLE_NUMBER}" \
-                "Teste que funcionou: ${ATTEMPTS}/4" \
+                "Teste que funcionou: ${ATTEMPTS}/1" \
                 "Ciclos registrados: ${PREVIOUS_RECORDED_CYCLES}" \
                 "Testes registrados: ${PREVIOUS_RECORDED_TESTS}" \
                 "Tempo: $(elapsed_seconds)s" \
@@ -588,16 +598,7 @@ jobs:
             return 0
           }
 
-          try_launch ""
-          sleep 5
-
-          try_launch "FAULT-DOMAIN-1"
-          sleep 5
-
-          try_launch "FAULT-DOMAIN-2"
-          sleep 5
-
-          try_launch "FAULT-DOMAIN-3"
+          try_launch "$SELECTED_FAULT_DOMAIN"
 
           echo "Instance was not created in this cycle. The schedule will try again."
           update_state "$LAST_RESULT"
@@ -611,7 +612,8 @@ jobs:
               "Resultado: Oracle retornou Out of host capacity" \
               "Nome: $DISPLAY_NAME" \
               "Ciclo: #${CYCLE_NUMBER}" \
-              "Testes neste ciclo: ${ATTEMPTS}/4" \
+              "Testes neste ciclo: ${ATTEMPTS}/1" \
+              "Fault domain testado: ${SELECTED_FAULT_DOMAIN_LABEL}" \
               "Sem capacidade: ${CAPACITY_ERRORS}" \
               "Erros transitórios: ${TRANSIENT_ERRORS}" \
               "Outros erros: ${OTHER_ERRORS}" \
@@ -629,7 +631,8 @@ jobs:
               "Resultado: timeout/conexão instável em parte das tentativas" \
               "Nome: $DISPLAY_NAME" \
               "Ciclo: #${CYCLE_NUMBER}" \
-              "Testes neste ciclo: ${ATTEMPTS}/4" \
+              "Testes neste ciclo: ${ATTEMPTS}/1" \
+              "Fault domain testado: ${SELECTED_FAULT_DOMAIN_LABEL}" \
               "Sem capacidade: ${CAPACITY_ERRORS}" \
               "Erros transitórios: ${TRANSIENT_ERRORS}" \
               "Outros erros: ${OTHER_ERRORS}" \
@@ -647,7 +650,8 @@ jobs:
               "Resultado: $LAST_RESULT" \
               "Nome: $DISPLAY_NAME" \
               "Ciclo: #${CYCLE_NUMBER}" \
-              "Testes neste ciclo: ${ATTEMPTS}/4" \
+              "Testes neste ciclo: ${ATTEMPTS}/1" \
+              "Fault domain testado: ${SELECTED_FAULT_DOMAIN_LABEL}" \
               "Sem capacidade: ${CAPACITY_ERRORS}" \
               "Erros transitórios: ${TRANSIENT_ERRORS}" \
               "Outros erros: ${OTHER_ERRORS}" \
