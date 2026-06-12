@@ -11,6 +11,9 @@ on:
         description: "RAM em GB da A1 Flex"
         required: false
         default: ""
+  push:
+    branches:
+      - main
   schedule:
     - cron: "*/5 * * * *"
 
