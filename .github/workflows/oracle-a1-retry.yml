@@ -145,8 +145,9 @@ jobs:
           OCPUS="${OCI_OCPUS:-1}"
           MEMORY_GB="${OCI_MEMORY_GB:-6}"
 
-          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
-            send_telegram "Oracle Auto: workflow iniciado manualmente.
+          if [ "$EVENT_NAME" = "workflow_dispatch" ] || [ "$EVENT_NAME" = "push" ]; then
+            send_telegram "Oracle Auto: workflow iniciado.
+          Evento: $EVENT_NAME
           Nome: $DISPLAY_NAME
           Tentativas: a cada 5 minutos
           Shape: VM.Standard.A1.Flex
