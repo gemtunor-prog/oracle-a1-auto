@@ -128,14 +128,6 @@ jobs:
           TRANSIENT_ERRORS=0
           OTHER_ERRORS=0
           LAST_RESULT="not-started"
-          FD_INDEX=$((TOTAL_RECORDED_TESTS % 4))
-          case "$FD_INDEX" in
-            0) SELECTED_FAULT_DOMAIN="" ;;
-            1) SELECTED_FAULT_DOMAIN="FAULT-DOMAIN-1" ;;
-            2) SELECTED_FAULT_DOMAIN="FAULT-DOMAIN-2" ;;
-            *) SELECTED_FAULT_DOMAIN="FAULT-DOMAIN-3" ;;
-          esac
-          SELECTED_FAULT_DOMAIN_LABEL="${SELECTED_FAULT_DOMAIN:-none}"
 
           elapsed_seconds() {
             echo "$(($(date +%s) - START_TS))"
@@ -309,6 +301,14 @@ jobs:
           PREDICTED_NEXT_START="$(format_time "$PREDICTED_NEXT_START_TS")"
           TOTAL_RECORDED_CYCLES="${PREVIOUS_RECORDED_CYCLES:-0}"
           TOTAL_RECORDED_TESTS="${PREVIOUS_RECORDED_TESTS:-0}"
+          FD_INDEX=$((TOTAL_RECORDED_TESTS % 4))
+          case "$FD_INDEX" in
+            0) SELECTED_FAULT_DOMAIN="" ;;
+            1) SELECTED_FAULT_DOMAIN="FAULT-DOMAIN-1" ;;
+            2) SELECTED_FAULT_DOMAIN="FAULT-DOMAIN-2" ;;
+            *) SELECTED_FAULT_DOMAIN="FAULT-DOMAIN-3" ;;
+          esac
+          SELECTED_FAULT_DOMAIN_LABEL="${SELECTED_FAULT_DOMAIN:-none}"
 
           send_telegram() {
             local text="$1"
