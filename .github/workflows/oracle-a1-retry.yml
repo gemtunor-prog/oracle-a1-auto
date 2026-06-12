@@ -280,7 +280,7 @@ jobs:
           path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
           PY
 
-            if git diff --quiet -- "$STATE_FILE"; then
+            if git diff --quiet -- "$STATE_FILE" && [ -z "$(git ls-files --others --exclude-standard "$STATE_FILE")" ]; then
               return 0
             fi
 
