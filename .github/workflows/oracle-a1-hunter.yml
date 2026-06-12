@@ -106,6 +106,7 @@ jobs:
           MAX_RUNTIME_SECONDS=20700
           LAUNCH_TIMEOUT_SECONDS=90
           CHECK_TIMEOUT_SECONDS=30
+          export SUPPRESS_LABEL_WARNING=True
           ATTEMPT=0
           CAPACITY_COUNT=0
           TRANSIENT_COUNT=0
@@ -195,12 +196,7 @@ jobs:
             fail_config "OCI_MEMORY_GB must be numeric. Current value: $MEMORY_GB"
           fi
 
-          cat > /tmp/shape_config.json <<EOF
-          {
-            "ocpus": ${OCPUS},
-            "memoryInGBs": ${MEMORY_GB}
-          }
-          EOF
+          printf '{"ocpus":%s,"memoryInGBs":%s}\n' "$OCPUS" "$MEMORY_GB" > /tmp/shape_config.json
 
           oci_safe() {
             local seconds="$1"
@@ -372,7 +368,6 @@ jobs:
               --subnet-id "$OCI_SUBNET_ID"
               --image-id "$IMAGE_ID"
               --ssh-authorized-keys-file /tmp/sshkey.pub
-              --assign-public-ip true
               --display-name "$DISPLAY_NAME"
               --query "data.id"
               --raw-output
