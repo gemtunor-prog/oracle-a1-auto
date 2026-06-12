@@ -1,0 +1,448 @@
+name: Oracle A1 Hunter
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 */6 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: oracle-a1-hunter
+  cancel-in-progress: false
+
+jobs:
+  hunter:
+    name: Hunt Oracle A1 capacity
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+
+    steps:
+      - name: Install OCI CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m pip install --user --upgrade pip
+          python3 -m pip install --user --upgrade oci-cli
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/oci" --version
+
+      - name: Configure OCI
+        shell: bash
+        env:
+          OCI_USER_OCID: ${{ secrets.OCI_USER_OCID }}
+          OCI_TENANCY_OCID: ${{ secrets.OCI_TENANCY_OCID }}
+          OCI_FINGERPRINT: ${{ secrets.OCI_FINGERPRINT }}
+          OCI_PRIVATE_KEY: ${{ secrets.OCI_PRIVATE_KEY }}
+          OCI_REGION: ${{ secrets.OCI_REGION }}
+          OCI_SSH_PUBLIC_KEY: ${{ secrets.OCI_SSH_PUBLIC_KEY }}
+        run: |
+          set -euo pipefail
+
+          missing=0
+          for name in OCI_USER_OCID OCI_TENANCY_OCID OCI_FINGERPRINT OCI_PRIVATE_KEY OCI_REGION OCI_SSH_PUBLIC_KEY; do
+            if [ -z "${!name:-}" ]; then
+              echo "::error title=Missing secret::$name is empty or not configured."
+              missing=1
+            fi
+          done
+
+          if [ "$missing" -ne 0 ]; then
+            exit 1
+          fi
+
+          mkdir -p "$HOME/.oci"
+          printf '%s' "$OCI_PRIVATE_KEY" | sed 's/\\n/\n/g' > "$HOME/.oci/oci_api_key.pem"
+          chmod 600 "$HOME/.oci/oci_api_key.pem"
+
+          cat > "$HOME/.oci/config" <<EOF
+          [DEFAULT]
+          user=${OCI_USER_OCID}
+          fingerprint=${OCI_FINGERPRINT}
+          tenancy=${OCI_TENANCY_OCID}
+          region=${OCI_REGION}
+          key_file=${HOME}/.oci/oci_api_key.pem
+          EOF
+
+          chmod 600 "$HOME/.oci/config"
+          printf '%s' "$OCI_SSH_PUBLIC_KEY" > /tmp/sshkey.pub
+          oci iam region list --auth api_key --output table >/dev/null
+          echo "OCI CLI configured."
+
+      - name: Hunt Oracle A1 Flex capacity
+        shell: bash
+        env:
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          GITHUB_RUN_NUMBER: ${{ github.run_number }}
+          GITHUB_SERVER_URL: ${{ github.server_url }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          OCI_COMPARTMENT_ID: ${{ secrets.OCI_COMPARTMENT_ID }}
+          OCI_AD: ${{ secrets.OCI_AD }}
+          OCI_SUBNET_ID: ${{ secrets.OCI_SUBNET_ID }}
+          OCI_IMAGE_ID: ${{ secrets.OCI_IMAGE_ID }}
+          OCI_REGION: ${{ secrets.OCI_REGION }}
+          OCI_DISPLAY_NAME: ${{ secrets.OCI_DISPLAY_NAME }}
+          OCI_OCPUS: ${{ secrets.OCI_OCPUS }}
+          OCI_MEMORY_GB: ${{ secrets.OCI_MEMORY_GB }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+        run: |
+          set +e
+          set -uo pipefail
+
+          SHAPE="VM.Standard.A1.Flex"
+          DISPLAY_NAME="${OCI_DISPLAY_NAME:-oracle-a1-auto}"
+          OCPUS="${OCI_OCPUS:-4}"
+          MEMORY_GB="${OCI_MEMORY_GB:-24}"
+          RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          HUNTER_START_TS="$(date +%s)"
+          MAX_RUNTIME_SECONDS=20700
+          LAUNCH_TIMEOUT_SECONDS=90
+          CHECK_TIMEOUT_SECONDS=30
+          ATTEMPT=0
+          CAPACITY_COUNT=0
+          TRANSIENT_COUNT=0
+          CONFIG_COUNT=0
+          LAST_TELEGRAM_TS=0
+          IMAGE_ID="${OCI_IMAGE_ID:-}"
+
+          send_telegram() {
+            local text="$1"
+            local response_file
+            local http_code
+
+            if [ -z "${TG_BOT_TOKEN:-}" ] || [ -z "${TG_CHAT_ID:-}" ]; then
+              echo "::warning::Telegram secrets TG_BOT_TOKEN or TG_CHAT_ID are empty."
+              return 0
+            fi
+
+            response_file="$(mktemp)"
+            if ! http_code="$(curl -sS -o "$response_file" -w "%{http_code}" \
+              -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
+              -d "chat_id=${TG_CHAT_ID}" \
+              --data-urlencode "text=${text}")"; then
+              echo "::warning::Telegram request failed before receiving an HTTP response."
+              cat "$response_file" || true
+              rm -f "$response_file"
+              return 0
+            fi
+
+            if [ "$http_code" -ge 200 ] && [ "$http_code" -lt 300 ]; then
+              echo "Telegram notification sent."
+            else
+              echo "::warning::Telegram notification failed with HTTP $http_code."
+              cat "$response_file" || true
+            fi
+
+            rm -f "$response_file"
+          }
+
+          send_telegram_lines() {
+            local text
+            text="$(printf '%s\n' "$@")"
+            send_telegram "$text"
+          }
+
+          elapsed_seconds() {
+            echo "$(($(date +%s) - HUNTER_START_TS))"
+          }
+
+          remaining_seconds() {
+            echo "$((MAX_RUNTIME_SECONDS - $(elapsed_seconds)))"
+          }
+
+          format_duration() {
+            local seconds="$1"
+            printf "%02dh%02dm%02ds" $((seconds / 3600)) $(((seconds % 3600) / 60)) $((seconds % 60))
+          }
+
+          fail_config() {
+            local message="$1"
+            CONFIG_COUNT=$((CONFIG_COUNT + 1))
+            echo "::error::$message"
+            send_telegram_lines \
+              "❌ Oracle A1 Hunter: erro grave de configuração" \
+              "Motivo: $message" \
+              "Nome: $DISPLAY_NAME" \
+              "Shape: $SHAPE" \
+              "OCPUs/RAM alvo: ${OCPUS}/${MEMORY_GB}GB" \
+              "Run: $RUN_URL"
+            exit 1
+          }
+
+          for name in OCI_COMPARTMENT_ID OCI_AD OCI_SUBNET_ID OCI_REGION; do
+            if [ -z "${!name:-}" ]; then
+              fail_config "$name is empty or not configured."
+            fi
+          done
+
+          if [ ! -s /tmp/sshkey.pub ]; then
+            fail_config "OCI_SSH_PUBLIC_KEY is empty or not configured."
+          fi
+
+          if ! [[ "$OCPUS" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+            fail_config "OCI_OCPUS must be numeric. Current value: $OCPUS"
+          fi
+
+          if ! [[ "$MEMORY_GB" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+            fail_config "OCI_MEMORY_GB must be numeric. Current value: $MEMORY_GB"
+          fi
+
+          SHAPE_CONFIG="{\"ocpus\":${OCPUS},\"memoryInGBs\":${MEMORY_GB}}"
+
+          oci_safe() {
+            local seconds="$1"
+            shift
+            timeout "$seconds" oci "$@" 2>&1
+          }
+
+          is_capacity_error() {
+            echo "$1" | grep -Eiq "Out of host capacity|Out of capacity|capacity"
+          }
+
+          is_transient_error() {
+            echo "$1" | grep -Eiq "RequestException|timed out|timeout|connection|Connection|ConnectTimeout|Read timed out|Max retries|Temporary failure|TLS|SSL|TooManyRequests|rate"
+          }
+
+          is_config_error() {
+            echo "$1" | grep -Eiq "NotAuthorized|Authorization|InvalidParameter|LimitExceeded|quota|Forbidden|InvalidSubnet|InvalidCompartment|NotAuthenticated|UnAuthorized|Auth"
+          }
+
+          existing_instance() {
+            local state="$1"
+            oci_safe "$CHECK_TIMEOUT_SECONDS" compute instance list \
+              --region "$OCI_REGION" \
+              --compartment-id "$OCI_COMPARTMENT_ID" \
+              --display-name "$DISPLAY_NAME" \
+              --lifecycle-state "$state" \
+              --query "data[0].id" \
+              --raw-output
+          }
+
+          find_platform_image() {
+            local version="$1"
+            oci_safe "$CHECK_TIMEOUT_SECONDS" compute image list \
+              --region "$OCI_REGION" \
+              --compartment-id "$OCI_COMPARTMENT_ID" \
+              --operating-system "Oracle Linux" \
+              --operating-system-version "$version" \
+              --shape "$SHAPE" \
+              --sort-by TIMECREATED \
+              --sort-order DESC \
+              --query "data[0].id" \
+              --raw-output
+          }
+
+          wait_for_running() {
+            local instance_id="$1"
+            local state=""
+            local start_ts
+            start_ts="$(date +%s)"
+
+            while [ "$(($(date +%s) - start_ts))" -lt 600 ]; do
+              state="$(oci_safe "$CHECK_TIMEOUT_SECONDS" compute instance get \
+                --region "$OCI_REGION" \
+                --instance-id "$instance_id" \
+                --query "data.\"lifecycle-state\"" \
+                --raw-output)"
+
+              echo "Instance state: $state"
+              if [ "$state" = "RUNNING" ]; then
+                return 0
+              fi
+
+              sleep 15
+            done
+
+            return 1
+          }
+
+          get_public_ip() {
+            local instance_id="$1"
+            local vnic_id=""
+            local public_ip=""
+
+            vnic_id="$(oci_safe "$CHECK_TIMEOUT_SECONDS" compute instance list-vnics \
+              --region "$OCI_REGION" \
+              --compartment-id "$OCI_COMPARTMENT_ID" \
+              --instance-id "$instance_id" \
+              --query "data[0].id" \
+              --raw-output)"
+
+            if [ -n "$vnic_id" ] && [ "$vnic_id" != "null" ]; then
+              public_ip="$(oci_safe "$CHECK_TIMEOUT_SECONDS" network vnic get \
+                --region "$OCI_REGION" \
+                --vnic-id "$vnic_id" \
+                --query "data.\"public-ip\"" \
+                --raw-output)"
+            fi
+
+            if [ -z "$public_ip" ] || [ "$public_ip" = "null" ]; then
+              echo "sem IP público ainda"
+            else
+              echo "$public_ip"
+            fi
+          }
+
+          if [ -z "$IMAGE_ID" ]; then
+            echo "OCI_IMAGE_ID not configured. Searching Oracle Linux 9 for $SHAPE..."
+            IMAGE_ID="$(find_platform_image "9")"
+
+            if [ -z "$IMAGE_ID" ] || [ "$IMAGE_ID" = "null" ] || is_config_error "$IMAGE_ID"; then
+              echo "Oracle Linux 9 image not found. Trying Oracle Linux 8..."
+              IMAGE_ID="$(find_platform_image "8")"
+            fi
+
+            if [ -z "$IMAGE_ID" ] || [ "$IMAGE_ID" = "null" ] || is_config_error "$IMAGE_ID"; then
+              fail_config "Could not find Oracle Linux 9 or 8 image compatible with $SHAPE. Response: $(echo "$IMAGE_ID" | head -c 500)"
+            fi
+          fi
+
+          send_telegram_lines \
+            "🏹 Oracle A1 Hunter iniciado" \
+            "Modo: caçador contínuo por até $(format_duration "$MAX_RUNTIME_SECONDS")" \
+            "Intervalo: 60-90s entre inícios de tentativa" \
+            "Timeout por tentativa: ${LAUNCH_TIMEOUT_SECONDS}s" \
+            "Nome: $DISPLAY_NAME" \
+            "Shape: $SHAPE" \
+            "Alvo: ${OCPUS}/${MEMORY_GB}GB" \
+            "Fault domains: none, FD-1, FD-2, FD-3 em rotação" \
+            "Run: $RUN_URL"
+
+          while [ "$(remaining_seconds)" -gt 180 ]; do
+            attempt_start_ts="$(date +%s)"
+            ATTEMPT=$((ATTEMPT + 1))
+
+            case $(((ATTEMPT - 1) % 4)) in
+              0) FAULT_DOMAIN="" ;;
+              1) FAULT_DOMAIN="FAULT-DOMAIN-1" ;;
+              2) FAULT_DOMAIN="FAULT-DOMAIN-2" ;;
+              *) FAULT_DOMAIN="FAULT-DOMAIN-3" ;;
+            esac
+            FAULT_DOMAIN_LABEL="${FAULT_DOMAIN:-none}"
+
+            echo "Attempt #$ATTEMPT. Fault domain: $FAULT_DOMAIN_LABEL. Elapsed: $(format_duration "$(elapsed_seconds)"). Remaining: $(format_duration "$(remaining_seconds)")."
+
+            existing_running="$(existing_instance RUNNING)"
+            if [ -n "$existing_running" ] && [ "$existing_running" != "null" ] && echo "$existing_running" | grep -q "ocid1.instance"; then
+              public_ip="$(get_public_ip "$existing_running")"
+              send_telegram_lines \
+                "✅ Oracle A1 Hunter: VM já está rodando" \
+                "Nome: $DISPLAY_NAME" \
+                "Shape: $SHAPE" \
+                "OCPUs/RAM: ${OCPUS}/${MEMORY_GB}GB" \
+                "Tentativas neste hunter: $ATTEMPT" \
+                "Tempo vivo: $(format_duration "$(elapsed_seconds)")" \
+                "Instance OCID: $existing_running" \
+                "IP público: $public_ip" \
+                "Run: $RUN_URL"
+              exit 0
+            fi
+
+            existing_provisioning="$(existing_instance PROVISIONING)"
+            if [ -n "$existing_provisioning" ] && [ "$existing_provisioning" != "null" ] && echo "$existing_provisioning" | grep -q "ocid1.instance"; then
+              send_telegram_lines \
+                "⏳ Oracle A1 Hunter: VM já está provisionando" \
+                "Nome: $DISPLAY_NAME" \
+                "Instance OCID: $existing_provisioning" \
+                "Vou parar para evitar duplicado." \
+                "Run: $RUN_URL"
+              exit 0
+            fi
+
+            args=(
+              compute instance launch
+              --region "$OCI_REGION"
+              --availability-domain "$OCI_AD"
+              --compartment-id "$OCI_COMPARTMENT_ID"
+              --shape "$SHAPE"
+              --shape-config "$SHAPE_CONFIG"
+              --subnet-id "$OCI_SUBNET_ID"
+              --image-id "$IMAGE_ID"
+              --ssh-authorized-keys-file /tmp/sshkey.pub
+              --assign-public-ip true
+              --display-name "$DISPLAY_NAME"
+              --query "data.id"
+              --raw-output
+            )
+
+            if [ -n "$FAULT_DOMAIN" ]; then
+              args+=(--fault-domain "$FAULT_DOMAIN")
+            fi
+
+            output="$(oci_safe "$LAUNCH_TIMEOUT_SECONDS" "${args[@]}")"
+            code=$?
+            attempt_duration="$(($(date +%s) - attempt_start_ts))"
+            echo "$output"
+            echo "Attempt #$ATTEMPT finished with code $code in ${attempt_duration}s."
+
+            if [ "$code" -eq 0 ] && echo "$output" | grep -q "ocid1.instance"; then
+              instance_id="$output"
+              wait_for_running "$instance_id" || true
+              public_ip="$(get_public_ip "$instance_id")"
+
+              send_telegram_lines \
+                "✅ Oracle A1 Hunter: VM criada com sucesso" \
+                "Nome: $DISPLAY_NAME" \
+                "Shape: $SHAPE" \
+                "OCPUs/RAM: ${OCPUS}/${MEMORY_GB}GB" \
+                "Fault Domain usado: $FAULT_DOMAIN_LABEL" \
+                "Tentativa vencedora: #$ATTEMPT" \
+                "Tempo vivo: $(format_duration "$(elapsed_seconds)")" \
+                "Instance OCID: $instance_id" \
+                "IP público: $public_ip" \
+                "Run: $RUN_URL"
+              exit 0
+            fi
+
+            if is_capacity_error "$output"; then
+              CAPACITY_COUNT=$((CAPACITY_COUNT + 1))
+              echo "Capacity unavailable. This is expected and not fatal."
+            elif is_transient_error "$output" || [ "$code" -eq 124 ]; then
+              TRANSIENT_COUNT=$((TRANSIENT_COUNT + 1))
+              echo "Transient OCI/network/timeout issue. This is not fatal."
+            elif is_config_error "$output"; then
+              fail_config "OCI returned a configuration/permission error on attempt #$ATTEMPT: $(echo "$output" | head -c 1200)"
+            else
+              TRANSIENT_COUNT=$((TRANSIENT_COUNT + 1))
+              echo "Unknown non-success response treated as transient to keep hunting."
+            fi
+
+            now_ts="$(date +%s)"
+            if [ $((now_ts - LAST_TELEGRAM_TS)) -ge 1800 ]; then
+              LAST_TELEGRAM_TS="$now_ts"
+              send_telegram_lines \
+                "🟡 Oracle A1 Hunter: ainda caçando" \
+                "Nome: $DISPLAY_NAME" \
+                "Alvo: ${OCPUS}/${MEMORY_GB}GB" \
+                "Tentativas: $ATTEMPT" \
+                "Sem capacidade: $CAPACITY_COUNT" \
+                "Transitórios/timeouts: $TRANSIENT_COUNT" \
+                "Último FD: $FAULT_DOMAIN_LABEL" \
+                "Tempo vivo: $(format_duration "$(elapsed_seconds)")" \
+                "Tempo restante: $(format_duration "$(remaining_seconds)")" \
+                "Run: $RUN_URL"
+            fi
+
+            next_gap="$((60 + RANDOM % 31))"
+            spent="$(($(date +%s) - attempt_start_ts))"
+            sleep_for="$((next_gap - spent))"
+            if [ "$sleep_for" -gt 0 ]; then
+              echo "Sleeping ${sleep_for}s before next attempt."
+              sleep "$sleep_for"
+            else
+              echo "Attempt took ${spent}s, starting next attempt immediately."
+            fi
+          done
+
+          send_telegram_lines \
+            "🛑 Oracle A1 Hunter: janela finalizada" \
+            "Resultado: não criou ainda, próximo hunter será iniciado pelo schedule/watchdog" \
+            "Nome: $DISPLAY_NAME" \
+            "Alvo: ${OCPUS}/${MEMORY_GB}GB" \
+            "Tentativas: $ATTEMPT" \
+            "Sem capacidade: $CAPACITY_COUNT" \
+            "Transitórios/timeouts: $TRANSIENT_COUNT" \
+            "Tempo vivo: $(format_duration "$(elapsed_seconds)")" \
+            "Run: $RUN_URL"
