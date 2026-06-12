@@ -195,7 +195,12 @@ jobs:
             fail_config "OCI_MEMORY_GB must be numeric. Current value: $MEMORY_GB"
           fi
 
-          SHAPE_CONFIG="{\"ocpus\":${OCPUS},\"memoryInGBs\":${MEMORY_GB}}"
+          cat > /tmp/shape_config.json <<EOF
+          {
+            "ocpus": ${OCPUS},
+            "memoryInGBs": ${MEMORY_GB}
+          }
+          EOF
 
           oci_safe() {
             local seconds="$1"
@@ -212,7 +217,7 @@ jobs:
           }
 
           is_config_error() {
-            echo "$1" | grep -Eiq "NotAuthorized|Authorization|InvalidParameter|LimitExceeded|quota|Forbidden|InvalidSubnet|InvalidCompartment|NotAuthenticated|UnAuthorized|Auth"
+            echo "$1" | grep -Eiq "CannotParseRequest|Incorrectly formatted request|NotAuthorized|Authorization|InvalidParameter|LimitExceeded|quota|Forbidden|InvalidSubnet|InvalidCompartment|NotAuthenticated|UnAuthorized|Auth"
           }
 
           existing_instance() {
@@ -363,7 +368,7 @@ jobs:
               --availability-domain "$OCI_AD"
               --compartment-id "$OCI_COMPARTMENT_ID"
               --shape "$SHAPE"
-              --shape-config "$SHAPE_CONFIG"
+              --shape-config file:///tmp/shape_config.json
               --subnet-id "$OCI_SUBNET_ID"
               --image-id "$IMAGE_ID"
               --ssh-authorized-keys-file /tmp/sshkey.pub
