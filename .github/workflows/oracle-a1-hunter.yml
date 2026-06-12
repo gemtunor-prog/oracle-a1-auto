@@ -104,14 +104,18 @@ jobs:
           RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
           HUNTER_START_TS="$(date +%s)"
           MAX_RUNTIME_SECONDS=20700
-          LAUNCH_TIMEOUT_SECONDS=90
-          CHECK_TIMEOUT_SECONDS=30
+          LAUNCH_TIMEOUT_SECONDS=55
+          CHECK_TIMEOUT_SECONDS=20
+          TELEGRAM_EVERY_SECONDS=300
           export SUPPRESS_LABEL_WARNING=True
           ATTEMPT=0
           CAPACITY_COUNT=0
           TRANSIENT_COUNT=0
           CONFIG_COUNT=0
           LAST_TELEGRAM_TS=0
+          LAST_RESULT="starting"
+          LAST_CODE=0
+          LAST_ATTEMPT_SECONDS=0
           IMAGE_ID="${OCI_IMAGE_ID:-}"
 
           send_telegram() {
@@ -201,7 +205,11 @@ jobs:
           oci_safe() {
             local seconds="$1"
             shift
-            timeout "$seconds" oci "$@" 2>&1
+            timeout "$seconds" oci \
+              --connection-timeout 8 \
+              --read-timeout 35 \
+              --no-retry \
+              "$@" 2>&1
           }
 
           is_capacity_error() {
@@ -310,7 +318,8 @@ jobs:
             "🏹 Oracle A1 Hunter iniciado" \
             "Modo: caçador contínuo por até $(format_duration "$MAX_RUNTIME_SECONDS")" \
             "Intervalo: 60-90s entre inícios de tentativa" \
-            "Timeout por tentativa: ${LAUNCH_TIMEOUT_SECONDS}s" \
+            "Timeout por tentativa: ${LAUNCH_TIMEOUT_SECONDS}s, sem retry interno da OCI CLI" \
+            "Telegram: status a cada $((TELEGRAM_EVERY_SECONDS / 60)) min" \
             "Nome: $DISPLAY_NAME" \
             "Shape: $SHAPE" \
             "Alvo: ${OCPUS}/${MEMORY_GB}GB" \
@@ -380,6 +389,8 @@ jobs:
             output="$(oci_safe "$LAUNCH_TIMEOUT_SECONDS" "${args[@]}")"
             code=$?
             attempt_duration="$(($(date +%s) - attempt_start_ts))"
+            LAST_CODE="$code"
+            LAST_ATTEMPT_SECONDS="$attempt_duration"
             echo "$output"
             echo "Attempt #$ATTEMPT finished with code $code in ${attempt_duration}s."
 
@@ -404,25 +415,35 @@ jobs:
 
             if is_capacity_error "$output"; then
               CAPACITY_COUNT=$((CAPACITY_COUNT + 1))
+              LAST_RESULT="sem capacidade"
               echo "Capacity unavailable. This is expected and not fatal."
             elif is_transient_error "$output" || [ "$code" -eq 124 ]; then
               TRANSIENT_COUNT=$((TRANSIENT_COUNT + 1))
+              if [ "$code" -eq 124 ]; then
+                LAST_RESULT="timeout OCI"
+              else
+                LAST_RESULT="erro transitorio OCI/rede"
+              fi
               echo "Transient OCI/network/timeout issue. This is not fatal."
             elif is_config_error "$output"; then
               fail_config "OCI returned a configuration/permission error on attempt #$ATTEMPT: $(echo "$output" | head -c 1200)"
             else
               TRANSIENT_COUNT=$((TRANSIENT_COUNT + 1))
+              LAST_RESULT="resposta desconhecida, continuando"
               echo "Unknown non-success response treated as transient to keep hunting."
             fi
 
             now_ts="$(date +%s)"
-            if [ $((now_ts - LAST_TELEGRAM_TS)) -ge 1800 ]; then
+            if [ $((now_ts - LAST_TELEGRAM_TS)) -ge "$TELEGRAM_EVERY_SECONDS" ]; then
               LAST_TELEGRAM_TS="$now_ts"
               send_telegram_lines \
                 "🟡 Oracle A1 Hunter: ainda caçando" \
                 "Nome: $DISPLAY_NAME" \
                 "Alvo: ${OCPUS}/${MEMORY_GB}GB" \
                 "Tentativas: $ATTEMPT" \
+                "Último resultado: $LAST_RESULT" \
+                "Último código: $LAST_CODE" \
+                "Duração da última tentativa: ${LAST_ATTEMPT_SECONDS}s" \
                 "Sem capacidade: $CAPACITY_COUNT" \
                 "Transitórios/timeouts: $TRANSIENT_COUNT" \
                 "Último FD: $FAULT_DOMAIN_LABEL" \
