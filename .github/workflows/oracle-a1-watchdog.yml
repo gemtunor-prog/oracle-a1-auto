@@ -2,6 +2,12 @@ name: Oracle A1 Watchdog
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/oracle-a1-watchdog.yml"
+      - ".github/workflows/oracle-a1-hunter.yml"
   schedule:
     - cron: "*/10 * * * *"
 
