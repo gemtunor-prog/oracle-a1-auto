@@ -125,6 +125,7 @@ jobs:
           TZ_NAME="America/Cuiaba"
           ATTEMPTS=0
           CAPACITY_ERRORS=0
+          TRANSIENT_ERRORS=0
           OTHER_ERRORS=0
           LAST_RESULT="not-started"
 
@@ -202,6 +203,7 @@ jobs:
             RESULT="$result" \
             ATTEMPTS="$ATTEMPTS" \
             CAPACITY_ERRORS="$CAPACITY_ERRORS" \
+            TRANSIENT_ERRORS="$TRANSIENT_ERRORS" \
             OTHER_ERRORS="$OTHER_ERRORS" \
             START_TS="$START_TS" \
             FINISHED_TS="$finished_ts" \
@@ -247,6 +249,7 @@ jobs:
           duration = int(os.environ["DURATION_SECONDS"])
           attempts = int(os.environ["ATTEMPTS"])
           capacity_errors = int(os.environ["CAPACITY_ERRORS"])
+          transient_errors = int(os.environ["TRANSIENT_ERRORS"])
           other_errors = int(os.environ["OTHER_ERRORS"])
           last_started = as_int("last_started_epoch", 0)
           observed_gap = start - last_started if last_started > 0 else 0
@@ -270,6 +273,7 @@ jobs:
               "last_result": os.environ["RESULT"],
               "last_attempts": attempts,
               "last_capacity_errors": capacity_errors,
+              "last_transient_errors": transient_errors,
               "last_other_errors": other_errors,
               "last_run_id": os.environ.get("RUN_ID", ""),
               "last_run_number": os.environ.get("RUN_NUMBER", ""),
@@ -565,6 +569,13 @@ jobs:
               return 0
             fi
 
+            if echo "$output" | grep -Eiq "RequestException|timed out|timeout|connection|Connection|ConnectTimeout|Read timed out|Max retries|Temporary failure|TLS|SSL"; then
+              echo "Transient OCI/network error detected."
+              TRANSIENT_ERRORS=$((TRANSIENT_ERRORS + 1))
+              LAST_RESULT="transient-error"
+              return 0
+            fi
+
             if echo "$output" | grep -Eiq "NotAuthorized|Authorization|InvalidParameter|LimitExceeded|quota|ServiceError|Forbidden|FaultDomain"; then
               OTHER_ERRORS=$((OTHER_ERRORS + 1))
               LAST_RESULT="error"
@@ -602,6 +613,7 @@ jobs:
               "Ciclo: #${CYCLE_NUMBER}" \
               "Testes neste ciclo: ${ATTEMPTS}/4" \
               "Sem capacidade: ${CAPACITY_ERRORS}" \
+              "Erros transitórios: ${TRANSIENT_ERRORS}" \
               "Outros erros: ${OTHER_ERRORS}" \
               "Ciclos registrados: ${PREVIOUS_RECORDED_CYCLES}" \
               "Testes registrados: ${PREVIOUS_RECORDED_TESTS}" \
@@ -611,6 +623,24 @@ jobs:
               "Próximo teste estimado: $PREDICTED_NEXT_START" \
               "Obs: o GitHub pode atrasar ou enfileirar, a previsão melhora a cada ciclo" \
               "Run: $RUN_URL"
+          elif [ "$LAST_RESULT" = "transient-error" ] && [ "$OTHER_ERRORS" -eq 0 ]; then
+            send_telegram_lines \
+              "🟠 Oracle Auto: erro transitório OCI" \
+              "Resultado: timeout/conexão instável em parte das tentativas" \
+              "Nome: $DISPLAY_NAME" \
+              "Ciclo: #${CYCLE_NUMBER}" \
+              "Testes neste ciclo: ${ATTEMPTS}/4" \
+              "Sem capacidade: ${CAPACITY_ERRORS}" \
+              "Erros transitórios: ${TRANSIENT_ERRORS}" \
+              "Outros erros: ${OTHER_ERRORS}" \
+              "Ciclos registrados: ${PREVIOUS_RECORDED_CYCLES}" \
+              "Testes registrados: ${PREVIOUS_RECORDED_TESTS}" \
+              "Tempo: $(elapsed_seconds)s" \
+              "Média de duração: ${AVG_DURATION_SECONDS}s" \
+              "Média entre inícios: ${AVG_START_GAP_SECONDS}s" \
+              "Próximo teste estimado: $PREDICTED_NEXT_START" \
+              "Obs: isso não significa configuração errada; o próximo ciclo tenta de novo" \
+              "Run: $RUN_URL"
           else
             send_telegram_lines \
               "🔴 Oracle Auto: ciclo terminou com erro" \
@@ -619,6 +649,7 @@ jobs:
               "Ciclo: #${CYCLE_NUMBER}" \
               "Testes neste ciclo: ${ATTEMPTS}/4" \
               "Sem capacidade: ${CAPACITY_ERRORS}" \
+              "Erros transitórios: ${TRANSIENT_ERRORS}" \
               "Outros erros: ${OTHER_ERRORS}" \
               "Ciclos registrados: ${PREVIOUS_RECORDED_CYCLES}" \
               "Testes registrados: ${PREVIOUS_RECORDED_TESTS}" \
